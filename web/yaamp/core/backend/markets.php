@@ -19,6 +19,7 @@ function BackendPricesUpdate()
 	updateHitBTCMarkets();
 	updateYobitMarkets();
 	updateAlcurexMarkets();
+	updateBinanceMarkets();
 	updateBterMarkets();
 	//updateEmpoexMarkets();
 	updateJubiMarkets();
@@ -26,6 +27,8 @@ function BackendPricesUpdate()
 	updateNovaMarkets();
 	updateCoinExchangeMarkets();
 	updateCoinsMarketsMarkets();
+	updateStocksExchangeMarkets();
+	updateTradeSatoshiMarkets();
 
 	updateShapeShiftMarkets();
 	updateOtherMarkets();
@@ -429,26 +432,24 @@ function updateCCexMarkets()
 	if (exchange_get($exchange, 'disabled')) return;
 
 	$ccex = new CcexAPI;
-
-	$list = $ccex->getMarkets();
+	$list = $ccex->getMarketSummaries();
 	if (!is_array($list)) return;
 
 	foreach($list as $ticker)
 	{
-		if(!isset($ticker['MarketCurrency'])) continue;
-		if(!isset($ticker['BaseCurrency'])) continue;
+		if(!isset($ticker['MarketName'])) continue;
+		$e = explode('-', $ticker['MarketName']);
 
-		$symbol = strtoupper($ticker['MarketCurrency']);
-		$pair = strtolower($symbol."-btc"); $sqlFilter = '';
+		$symbol = strtoupper($e[0]);
+		$base_symbol = strtoupper($e[1]);
 
-		$base_symbol = $ticker['BaseCurrency'];
+		$sqlFilter = '';
 		if ($base_symbol != 'BTC') {
 			// Only track ALT markets (LTC, DOGE) if the market record exists in the DB, sample market name "c-cex LTC"
 			$in_db = (int) dboscalar("SELECT count(M.id) FROM markets M INNER JOIN coins C ON C.id=M.coinid
 				WHERE C.installed AND C.symbol=:sym AND M.base_coin=:base", array(':sym'=>$symbol,':base'=>$base_symbol));
 			if (!$in_db) continue;
 			$sqlFilter = "AND base_coin='$base_symbol'";
-			$pair = strtolower($symbol.'-'.$base_symbol);
 		}
 
 		$coin = getdbosql('db_coins', "symbol=:symbol", array(':symbol'=>$symbol));
@@ -457,7 +458,8 @@ function updateCCexMarkets()
 
 		$market = getdbosql('db_markets', "coinid={$coin->id} AND name LIKE '$exchange%' $sqlFilter");
 		if (!$market) continue;
-		if ($market->disabled < 9) $market->disabled = !$ticker['IsActive'];
+		//if ($market->disabled < 9) $market->disabled = !$ticker['IsActive']; // only in GetMarkets()
+		if ($market->disabled < 9) $market->disabled = ($ticker['OpenBuyOrders'] <= 1);
 
 		if (market_get($exchange, $symbol, "disabled")) {
 			$market->disabled = 1;
@@ -468,14 +470,9 @@ function updateCCexMarkets()
 
 		if ($market->disabled || $market->deleted) continue;
 
-		sleep(1);
-		$ticker = $ccex->getTickerInfo($pair);
-		if(!$ticker) continue;
-
-		$price2 = ($ticker['buy']+$ticker['sell'])/2;
-
+		$price2 = ($ticker['Bid']+$ticker['Ask'])/2;
 		$market->price2 = AverageIncrement($market->price2, $price2);
-		$market->price = AverageIncrement($market->price, $ticker['buy']);
+		$market->price = AverageIncrement($market->price, $ticker['Bid']);
 		$market->pricetime = time();
 		$market->save();
 
@@ -556,8 +553,14 @@ function updatePoloniexMarkets()
 		$market->save();
 
 		if(empty($market->deposit_address) && $coin->installed && !empty(EXCH_POLONIEX_KEY)) {
-			if ($coin->symbol != 'EXE')
+			$last_checked = cache()->get($exchange.'-deposit_address-check');
+			if (time() - $last_checked < 3600) {
+				// if still empty after get_deposit_addresses(), generate one
 				$poloniex->generate_address($coin->symbol);
+				sleep(1);
+			}
+			// empty address found, so force get_deposit_addresses check
+			cache()->set($exchange.'-deposit_address-check', 0, 10);
 		}
 
 //		debuglog("$exchange: update $coin->symbol: $market->price $market->price2");
@@ -652,7 +655,7 @@ function updateYobitMarkets()
 			$last_checked = cache()->get($exchange.'-deposit_address-check-'.$symbol);
 			if ($last_checked) continue;
 
-			sleep(1); // for the tapi nonce
+			sleep(1); // for the api nonce
 			$address = yobit_api_query2('GetDepositAddress', array("coinName"=>$symbol));
 			if (!empty($address) && isset($address['return']) && $address['success']) {
 				$addr = $address['return']['address'];
@@ -831,25 +834,34 @@ function updateCryptopiaMarkets()
 	if ($last_checked) return;
 
 	$addresses = array();
+	sleep(1);
 	$query = cryptopia_api_user('GetBalance');
 	if (is_object($query) && is_array($query->Data))
 	foreach($query->Data as $balance) {
-		$addresses[$balance->Symbol] = $balance->Address;
+		$addr = objSafeVal($balance,'Address');
+		if (!empty($addr)) $addresses[$balance->Symbol] = $addr;
 	}
+	// for some reason, no more available in global GetBalance api
+	$needCurrencyQueries = empty($addresses);
 
-	if (!empty($addresses))
+	if (!empty($list))
 	foreach($list as $market) {
 		$coin = getdbo('db_coins', $market->coinid);
 		if(!$coin) continue;
 
 		$symbol = $coin->getOfficialSymbol();
-		if (isset($addresses[$symbol])) {
-			$addr = $addresses[$symbol];
-			if ($market->deposit_address != $addr) {
-				debuglog("$exchange: deposit address for {$symbol} updated");
-				$market->deposit_address = $addr;
-				$market->save();
-			}
+		$addr = arraySafeVal($addresses, $symbol);
+		if ($needCurrencyQueries) {
+			if(!$coin->installed) continue;
+			sleep(2);
+			$query = cryptopia_api_user('GetDepositAddress', array('Currency'=>$symbol));
+			$dep = objSafeVal($query,'Data');
+			$addr = objSafeVal($dep,'Address');
+		}
+		if (!empty($addr) && $market->deposit_address != $addr) {
+			debuglog("$exchange: deposit address for {$symbol} updated");
+			$market->deposit_address = $addr;
+			$market->save();
 		}
 	}
 	cache()->set($exchange.'-deposit_address-check', time(), 12*3600);
@@ -896,6 +908,7 @@ function updateHitBTCMarkets()
 				$market->price = AverageIncrement($market->price, (double)$ticker['bid']);
 				$market->price2 = AverageIncrement($market->price2, $price2);
 				$market->pricetime = time(); // $ticker->timestamp
+				$market->priority = -1;
 				$market->save();
 
 				if (empty($coin->price2) && strpos($pair,'BTC') !== false) {
@@ -1010,6 +1023,48 @@ function updateNovaMarkets()
 					}
 				}
 				cache()->set($exchange.'-deposit_address-check-'.$symbol, time(), 24*3600);
+			}
+		}
+	}
+}
+
+function updateBinanceMarkets()
+{
+	$exchange = 'binance';
+	if (exchange_get($exchange, 'disabled')) return;
+
+	$tickers = binance_api_query('ticker/allBookTickers');
+	if(!is_array($tickers)) return;
+
+	$list = getdbolist('db_markets', "name='$exchange'");
+	foreach($list as $market)
+	{
+		$coin = getdbo('db_coins', $market->coinid);
+		if(!$coin) continue;
+
+		$symbol = $coin->getOfficialSymbol();
+		if (market_get($exchange, $symbol, "disabled")) {
+			$market->disabled = 1;
+			$market->message = 'disabled from settings';
+			$market->save();
+			continue;
+		}
+
+		$pair = $symbol.'BTC';
+		foreach ($tickers as $ticker) {
+			if ($pair != $ticker->symbol) continue;
+
+			$price2 = ($ticker->bidPrice+$ticker->askPrice)/2;
+			$market->price = AverageIncrement($market->price, $ticker->bidPrice);
+			$market->price2 = AverageIncrement($market->price2, $price2);
+			$market->pricetime = time();
+			if ($market->disabled < 9) $market->disabled = (floatval($ticker->bidQty) < 0.01);
+			$market->save();
+
+			if (empty($coin->price2)) {
+				$coin->price = $market->price;
+				$coin->price2 = $market->price2;
+				$coin->save();
 			}
 		}
 	}
@@ -1272,6 +1327,99 @@ function updateCoinsMarketsMarkets()
 			$market->price2 = AverageIncrement($market->price2, $market->price);
 			//if (!$market->disabled) $market->disabled = 1;
 		}
+
+		//debuglog("$exchange: $symbol price set to ".bitcoinvaluetoa($market->price));
+		$market->pricetime = time();
+		$market->save();
+
+		if (empty($coin->price2)) {
+			$coin->price = $market->price;
+			$coin->price2 = $market->price2;
+			$coin->save();
+		}
+	}
+}
+
+function updateStocksExchangeMarkets()
+{
+	$exchange = 'stocksexchange';
+	if (exchange_get($exchange, 'disabled')) return;
+
+	$list = stocksexchange_api_query('ticker');
+	if(empty($list) || !is_array($list)) return;
+	foreach($list as $m)
+	{
+		$e = explode('_', $m->market_name);
+		$symbol = strtoupper($e[0]); $base = $e[1];
+		if($base != 'BTC') continue;
+
+		$coin = getdbosql('db_coins', "symbol=:sym", array(':sym'=>$symbol));
+		if(!$coin) continue;
+
+		$market = getdbosql('db_markets', "coinid={$coin->id} AND name='$exchange' AND IFNULL(base_coin,'') IN ('','BTC')");
+		if(!$market) continue;
+
+		$symbol = $coin->getOfficialSymbol();
+		if (market_get($exchange, $symbol, "disabled")) {
+			$market->disabled = 1;
+			$market->message = 'disabled from settings';
+			$market->save();
+			continue;
+		}
+
+		$market->disabled = ($m->bid == 0);
+
+		$price2 = ((double)$m->ask + (double)$m->bid)/2;
+		$market->price2 = AverageIncrement($market->price2, $price2);
+		$market->price = AverageIncrement($market->price, (double)$m->bid);
+		$market->priority = -1; // not ready for trading
+		$market->txfee = $m->sell_fee_percent;
+
+		//debuglog("$exchange: $symbol price set to ".bitcoinvaluetoa($market->price));
+		$market->pricetime = time(); // $m->updated_time;
+		$market->save();
+
+		if (empty($coin->price2)) {
+			$coin->price = $market->price;
+			$coin->price2 = $market->price2;
+			$coin->save();
+		}
+	}
+}
+
+function updateTradeSatoshiMarkets()
+{
+	$exchange = 'tradesatoshi';
+	if (exchange_get($exchange, 'disabled')) return;
+
+	$data = tradesatoshi_api_query('getmarketsummaries');
+	if(!is_object($data) || !$data->success || !is_array($data->result)) return;
+	foreach($data->result as $m)
+	{
+		$e = explode('_', $m->market);
+		$symbol = strtoupper($e[0]); $base = $e[1];
+		if($base != 'BTC') continue;
+
+		$coin = getdbosql('db_coins', "symbol=:sym", array(':sym'=>$symbol));
+		if(!$coin) continue;
+
+		$market = getdbosql('db_markets', "coinid={$coin->id} AND name='$exchange' AND IFNULL(base_coin,'') IN ('','BTC')");
+		if(!$market) continue;
+
+		$symbol = $coin->getOfficialSymbol();
+		if (market_get($exchange, $symbol, "disabled")) {
+			$market->disabled = 1;
+			$market->message = 'disabled from settings';
+			$market->save();
+			continue;
+		}
+
+		$market->disabled = ($m->openBuyOrders == 0);
+
+		$price2 = ((double)$m->ask + (double)$m->bid)/2;
+		$market->price2 = AverageIncrement($market->price2, $price2);
+		$market->price = AverageIncrement($market->price, (double)$m->bid);
+		$market->priority = -1; // not ready for trading
 
 		//debuglog("$exchange: $symbol price set to ".bitcoinvaluetoa($market->price));
 		$market->pricetime = time();

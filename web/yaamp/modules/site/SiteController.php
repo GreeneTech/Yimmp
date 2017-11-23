@@ -5,12 +5,19 @@ class SiteController extends CommonController
 	public $defaultAction='index';
 
 	///////////////////////////////////////////////////
-
+	// Security Note: You can rename this action as you
+	// want, to customize the admin entrance url...
+	//
 	public function actionAdminRights()
 	{
-		$client_ip = $_SERVER['REMOTE_ADDR'];
-
+		$client_ip = arraySafeVal($_SERVER,'REMOTE_ADDR');
 		$valid = isAdminIP($client_ip);
+
+		if (arraySafeVal($_SERVER,'HTTP_X_FORWARDED_FOR','') != '') {
+			debuglog("admin access attempt via IP spoofing!");
+			$valid = false;
+		}
+
 		if ($valid)
 			debuglog("admin connect from $client_ip");
 		else
@@ -337,6 +344,8 @@ class SiteController extends CommonController
 		$rule->notifycmd = $_POST['notifycmd'];
 		$rule->description = $_POST['description'];
 		$rule->enabled = 1;
+		$rule->lastchecked = 0; // time
+		$rule->lasttriggered = 0;
 
 		$words = explode(' ', $rule->conditiontype);
 		if (count($words) < 2) {
@@ -644,6 +653,36 @@ class SiteController extends CommonController
 		$user = getdbo('db_accounts', getiparam('id'));
 		if ($user) {
 			BackendUserCancelFailedPayment($user->id);
+		}
+		$this->goback();
+	}
+
+	public function actionCancelUsersPayment()
+	{
+		if(!$this->admin) return;
+		$coin = getdbo('db_coins', getiparam('id'));
+		if ($coin) {
+			$amount_failed = 0.0; $cnt = 0;
+			$time = time() - (48 * 3600);
+			$failed = getdbolist('db_payouts', "idcoin=:id AND IFNULL(tx,'') = '' AND time>$time", array(':id'=>$coin->id));
+			if (!empty($failed)) {
+				foreach ($failed as $payout) {
+					$user = getdbo('db_accounts', $payout->account_id);
+					if ($user) {
+						$user->balance += floatval($payout->amount);
+						if ($user->save()) {
+							$amount_failed += floatval($payout->amount);
+							$cnt++;
+						}
+					}
+					$payout->delete();
+				}
+				user()->setFlash('message', "Restored $cnt failed txs to user balances, $amount_failed {$coin->symbol}");
+			} else {
+				user()->setFlash('message', 'No failed txs found');
+			}
+		} else {
+			user()->setFlash('error', 'Invalid coin id!');
 		}
 		$this->goback();
 	}
@@ -1061,6 +1100,9 @@ class SiteController extends CommonController
 	public function actionGomining()
 	{
 		$algo = substr(getparam('algo'), 0, 32);
+		if ($algo == 'all') {
+			return;
+		}
 		user()->setState('yaamp-algo', $algo);
 		$this->redirect("/site/mining");
 	}

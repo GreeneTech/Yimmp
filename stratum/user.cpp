@@ -138,19 +138,34 @@ void db_clear_worker(YAAMP_DB *db, YAAMP_CLIENT *client)
 
 void db_add_worker(YAAMP_DB *db, YAAMP_CLIENT *client)
 {
-	db_clear_worker(db, client);
+	char password[128] = { 0 };
+	char version[128] = { 0 };
+	char worker[128] = { 0 };
 	int now = time(NULL);
 
-	/* maybe not required here (already made), but... */
+	db_clear_worker(db, client);
+
 	db_check_user_input(client->username);
 	db_check_user_input(client->version);
 	db_check_user_input(client->password);
 	db_check_user_input(client->worker);
 
+	// strip for recent mysql defaults (error if fields are too long)
+	if (strlen(client->password) > 64)
+		clientlog(client, "password too long truncated: %s", client->password);
+	if (strlen(client->version) > 64)
+		clientlog(client, "version too long truncated: %s", client->version);
+	if (strlen(client->worker) > 64)
+		clientlog(client, "worker too long truncated: %s", client->worker);
+
+	strncpy(password, client->password, 64);
+	strncpy(version, client->version, 64);
+	strncpy(worker, client->worker, 64);
+
 	db_query(db, "INSERT INTO workers (userid, ip, name, difficulty, version, password, worker, algo, time, pid) "\
 		"VALUES (%d, '%s', '%s', %f, '%s', '%s', '%s', '%s', %d, %d)",
 		client->userid, client->sock->ip, client->username, client->difficulty_actual,
-		client->version, client->password, client->worker, g_stratum_algo, now, getpid());
+		version, password, worker, g_stratum_algo, now, getpid());
 
 	client->workerid = (int)mysql_insert_id(&db->mysql);
 }
@@ -168,7 +183,8 @@ void db_update_workers(YAAMP_DB *db)
 		{
 			clientlog(client, "speed %f", client->speed);
 			shutdown(client->sock->sock, SHUT_RDWR);
-
+			db_clear_worker(db, client);
+			object_delete(client);
 			continue;
 		}
 
@@ -180,7 +196,7 @@ void db_update_workers(YAAMP_DB *db)
 		client->difficulty_written = client->difficulty_actual;
 	}
 
-	client_sort();
+	//client_sort();
 	g_list_client.Leave();
 }
 

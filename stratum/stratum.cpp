@@ -107,7 +107,7 @@ YAAMP_ALGO g_algos[] =
 
 	{"timetravel", timetravel_hash, 0x100, 0, 0},
 	{"bitcore", timetravel10_hash, 0x100, 0, 0},
-
+	{"hsr", hsr_hash, 1, 0, 0},
 	{"hmq1725", hmq17_hash, 0x10000, 0, 0},
 
 	{"jha", jha_hash, 0x10000, 0},
@@ -134,6 +134,8 @@ YAAMP_ALGO g_algos[] =
 	{"skein", skein_hash, 1, 0, 0},
 	{"tribus", tribus_hash, 1, 0, 0},
 	{"keccak", keccak256_hash, 0x80, 0, sha256_hash_hex },
+	{"phi", phi_hash, 1, 0, 0},
+	{"polytimos", polytimos_hash, 1, 0, 0},
 	{"skunk", skunk_hash, 1, 0, 0},
 
 	{"bmw", bmw_hash, 1, 0, 0},
@@ -334,20 +336,20 @@ void *monitor_thread(void *p)
 		if(g_last_broadcasted + YAAMP_MAXJOBDELAY < time(NULL))
 		{
 			g_exiting = true;
-			stratumlogdate("%s dead lock, exiting...\n", g_current_algo->name);
+			stratumlogdate("%s dead lock, exiting...\n", g_stratum_algo);
 			exit(1);
 		}
 
 		if(g_max_shares && g_shares_counter) {
 
 			if((g_shares_counter - g_shares_log) > 10000) {
-				stratumlogdate("%s %luK shares...\n", g_current_algo->name, (g_shares_counter/1000u));
+				stratumlogdate("%s %luK shares...\n", g_stratum_algo, (g_shares_counter/1000u));
 				g_shares_log = g_shares_counter;
 			}
 
 			if(g_shares_counter > g_max_shares) {
 				g_exiting = true;
-				stratumlogdate("%s need a restart (%lu shares), exiting...\n", g_current_algo->name, g_max_shares);
+				stratumlogdate("%s need a restart (%lu shares), exiting...\n", g_stratum_algo, (unsigned long) g_max_shares);
 				exit(1);
 			}
 		}
@@ -378,23 +380,33 @@ void *stratum_thread(void *p)
 
 	/////////////////////////////////////////////////////////////////////////
 
+	int failcount = 0;
 	while(!g_exiting)
 	{
 		int sock = accept(listen_sock, NULL, NULL);
 		if(sock <= 0)
 		{
-			stratumlog("%s accept error %d %d\n", g_current_algo->name, res, errno);
-			usleep(10000);
+			int error = errno;
+			stratumlog("%s socket accept() error %d\n", g_stratum_algo, error);
+			failcount++;
+			usleep(50000);
+			if (error == 24 && failcount > 16) {
+				g_exiting = true;
+				stratumlogdate("%s too much socket failure, exiting...\n", g_stratum_algo);
+				exit(error);
+			}
 			continue;
 		}
 
+		failcount = 0;
 		pthread_t thread;
-
 		int res = pthread_create(&thread, NULL, client_thread, (void *)(long)sock);
 		if(res != 0)
 		{
+			int error = errno;
 			close(sock);
-			stratumlog("%s pthread_create error %d %d\n", g_current_algo->name, res, errno);
+			g_exiting = true;
+			stratumlog("%s pthread_create error %d %d\n", g_stratum_algo, res, error);
 		}
 
 		pthread_detach(thread);

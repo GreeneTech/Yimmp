@@ -23,7 +23,8 @@ $algoFilter = $algo != 'all' ? ' AND B.algo='.sqlQuote($algo) : '';
 
 $chips = array();
 $in_db = dbolist("SELECT DISTINCT B.idchip as id, B.type, C.chip as name FROM benchmarks B".
-	" LEFT JOIN bench_chips C ON C.id=B.idchip WHERE B.idchip IS NOT NULL $algoFilter AND $sqlFilter GROUP BY B.idchip ORDER BY type DESC, name ASC");
+	" LEFT JOIN bench_chips C ON C.id=B.idchip WHERE B.idchip IS NOT NULL $algoFilter AND $sqlFilter".
+	" GROUP BY B.idchip, B.type ORDER BY B.type DESC, name ASC");
 foreach ($in_db as $row) {
 	$chips[$row['id']] = $row['name'];
 }
@@ -112,8 +113,8 @@ echo <<<END
 <th data-sorter="text">Time</th>
 <th data-sorter="text">Chip</th>
 <th data-sorter="text">Device</th>
-<th data-sorter="text">Arch</th>
 <th data-sorter="text">Vendor ID</th>
+<th data-sorter="text">Arch</th>
 <th data-sorter="numeric">Hashrate</th>
 <th data-sorter="numeric" title="Intensity (-i) for GPU or Threads (-t) for CPU miners">Int.</th>
 <th data-sorter="numeric" title="MHz">Freq</th>
@@ -135,6 +136,9 @@ foreach ($db_rows as $row) {
 	echo '<tr class="ssrow">';
 
 	$hashrate = Itoa2(1000*round($row['khps'],3),2).'H';
+	if ($algo == 'equihash')
+		$hashrate = Itoa2(1000*round($row['khps'],5),3).'&nbsp;Sol/s';
+
 	$age = datetoa2($row['time']);
 
 	echo '<td class="algo">'.CHtml::link($row['algo'],'/bench?algo='.$row['algo']).'</td>';
@@ -142,12 +146,12 @@ foreach ($db_rows as $row) {
 	echo '<td>'.($row['idchip'] ? CHtml::link($row['chip'],'/bench?chip='.$row['idchip']) : $row['chip']).'</td>';
 	if ($row['type'] == 'cpu') {
 		echo '<td>'.formatCPU($row).'</td>';
-		echo '<td>'.$row['arch'].'</td>';
 		echo '<td>'.CHtml::link($row['vendorid'],'/bench?vid='.$row['vendorid']).'</td>';
+		echo '<td>'.$row['arch'].'</td>';
 	} else {
 		echo '<td>'.$row['device'].getProductIdSuffix($row).'</td>';
-		echo '<td>'.formatCudaArch($row['arch']).'</td>';
 		echo '<td>'.CHtml::link($row['vendorid'],'/bench?vid='.$row['vendorid']).'</td>';
+		echo '<td>'.formatCudaArch($row['arch']).'</td>';
 	}
 
 	echo '<td data="'.$row['khps'].'">'.$hashrate.'</td>';
@@ -176,6 +180,12 @@ foreach ($db_rows as $row) {
 	// power
 	$title = ''; $class = '';
 	$power = (double) $row['power'];
+
+	// Adjust the 750 Ti nvml watts
+	$factor = 1.0;
+	if ($row['chip'] == '750' || $row['chip'] == '750 Ti' || $row['chip'] == 'Quadro K620') $factor = 2.0;
+	$power *= $factor;
+
 	$content = $power>0 ? $power : '-';
 	if ($row['plimit']) {
 		$title = 'Power limit '.$row['plimit'].'W';
@@ -184,7 +194,7 @@ foreach ($db_rows as $row) {
 	$props = array('title'=>$title,'class'=>$class);
 	echo CHtml::tag('td', $props, $content, true);
 
-	echo '<td>'.($power>0 ? Itoa2(1000*round($row['khps'] / $power, 3),2) : '-').'</td>';
+	echo '<td>'.($power>0 ? Itoa2(1000*round($row['khps'] / $power, 4),3) : '-').'</td>';
 	echo '<td>'.formatClientName($row['client']).'</td>';
 	echo '<td>'.$row['os'].'</td>';
 	echo '<td>'.$row['driver'].'</td>';
@@ -201,6 +211,7 @@ echo '</tbody>';
 
 if (!empty($algo)) {
 
+	$factor = isset($factor) ? $factor : 1.0;
 	if ($idchip) $sqlFilter .= ' AND idchip='.intval($idchip);
 
 	$avg = dborow("SELECT AVG(khps) as khps, AVG(power) as power, AVG(B.intensity) as intensity, AVG(freq) as freq, ".
@@ -227,7 +238,7 @@ if (!empty($algo)) {
 		echo '<th>'.($avg['intensity'] ? round($avg['intensity'],1) : '').'</th>';
 		echo '<th>'.($avg['freq'] ? round($avg['freq']) : '').'</th>';
 
-		$power = (double) $avg['power'];
+		$power = (double) $avg['power'] * $factor;
 		echo '<th>'.($power>0 ? round($power) : '').'</th>';
 
 		$hpw = ($power>0) ? $hpw = floatval($avg['khps']) / $power : 0;

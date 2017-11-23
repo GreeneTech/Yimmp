@@ -34,26 +34,30 @@ function BackendCoinsUpdate()
 	{
 //		debuglog("doing $coin->name");
 
-		$coin = getdbo('db_coins', $coin->id);
-		if(!$coin) continue;
-
 		$remote = new WalletRPC($coin);
 
 		$info = $remote->getinfo();
-		if(!$info)
+		if(!$info && $coin->enable)
 		{
-			$coin->enable = false;
-		//	$coin->auto_ready = false;
-			$coin->connections = 0;
-
-			$coin->save();
-			continue;
+			debuglog("{$coin->symbol} no getinfo answer, retrying...");
+			sleep(3);
+			$info = $remote->getinfo();
+			if (!$info) {
+				debuglog("{$coin->symbol} disabled, no answer after 2 attempts. {$remote->error}");
+				$coin->enable = false;
+				$coin->connections = 0;
+				$coin->save();
+				continue;
+			}
 		}
 
-		if ($debug) echo "{$coin->symbol}\n";
+		// auto-enable if auto_ready is set
+		if($coin->auto_ready && !empty($info))
+			$coin->enable = true;
+		else if (empty($info))
+			continue;
 
-//		debuglog($info);
-		$coin->enable = true;
+		if ($debug) echo "{$coin->symbol}\n";
 
 		if(isset($info['difficulty']))
 			$difficulty = $info['difficulty'];
@@ -242,7 +246,7 @@ function BackendCoinsUpdate()
 			$coin->last_network_found = time();
 		}
 
-		$coin->version = $info['version'];
+		$coin->version = substr($info['version'], 0, 32);
 		$coin->block_height = $info['blocks'];
 
 		if($coin->powend_height > 0 && $coin->block_height > $coin->powend_height) {
@@ -273,20 +277,19 @@ function BackendCoinsUpdate()
 			$coin->index_avg = $coin->reward * $coin->price * 10000 / $coin->difficulty;
 			if(!$coin->auxpow && $coin->rpcencoding == 'POW')
 			{
-	 			$indexaux = dboscalar("select sum(index_avg) from coins where enable and visible and auto_ready and auxpow and algo='$coin->algo'");
+				$indexaux = dboscalar("SELECT SUM(index_avg) FROM coins WHERE enable AND visible AND auto_ready AND auxpow AND algo='{$coin->algo}'");
 				$coin->index_avg += $indexaux;
 			}
 		}
 
 		if($coin->network_hash) {
-			$coin->network_ttf = $coin->difficulty * 0x100000000 / $coin->network_hash;
-
-			// BTC network_hash unit may be wrong... prevent db int(11) overflow
-			if($coin->network_ttf > 9999999999) $coin->network_ttf = 0;
+			$coin->network_ttf = intval($coin->difficulty * 0x100000000 / $coin->network_hash);
+			if($coin->network_ttf > 2147483647) $coin->network_ttf = 2147483647;
 		}
 
 		if(isset($pool_rate[$coin->algo]))
-			$coin->pool_ttf = $coin->difficulty * 0x100000000 / $pool_rate[$coin->algo];
+			$coin->pool_ttf = intval($coin->difficulty * 0x100000000 / $pool_rate[$coin->algo]);
+		if($coin->pool_ttf > 2147483647) $coin->pool_ttf = 2147483647;
 
 		if(strstr($coin->image, 'http'))
 		{
